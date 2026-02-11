@@ -343,9 +343,21 @@ def get_course(request, course_key, check_tab=True):
     discussion_tab = CourseTabList.get_tab_by_type(course.tabs, 'discussion')
     is_course_staff = CourseStaffRole(course_key).has_user(request.user)
     is_course_admin = CourseInstructorRole(course_key).has_user(request.user)
+
+    # Check if the user is banned from discussions
+    is_user_banned_func = getattr(forum_api, 'is_user_banned', None)
+    is_user_banned = False
+    if is_user_banned_func is not None:
+        try:
+            is_user_banned = is_user_banned_func(request.user, course_key)
+        except Exception:  # pylint: disable=broad-except
+            # If ban check fails, default to False
+            is_user_banned = False
+
     return {
         "id": str(course_key),
         "is_posting_enabled": is_posting_enabled,
+        "is_user_banned": is_user_banned,
         "blackouts": [
             {
                 "start": _format_datetime(blackout["start"]),

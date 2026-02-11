@@ -1706,6 +1706,10 @@ class DiscussionModerationViewSet(DeveloperErrorViewMixin, ViewSet):
 
         Returns tuple of (user, course_key, ban_scope, reason) or Response object on error.
         """
+        from lms.djangoapps.discussion.rest_api.utils import (
+            _is_privileged_user,
+        )
+
         user_id = serializer_data.get('user_id')
         lookup_username = serializer_data.get('lookup_username')
         course_id_str = serializer_data['course_id']
@@ -1729,6 +1733,18 @@ class DiscussionModerationViewSet(DeveloperErrorViewMixin, ViewSet):
             return Response(
                 {'error': f'User {identifier} does not exist'},
                 status=status.HTTP_404_NOT_FOUND
+            )
+
+        # Check if user is staff/privileged - they shouldn't be banned
+        if _is_privileged_user(user, course_key):
+            return Response(
+                {
+                    'error': (
+                        f'Cannot ban staff or privileged users. User {user.username} '
+                        f'has elevated permissions in this course.'
+                    )
+                },
+                status=status.HTTP_400_BAD_REQUEST
             )
 
         return user, course_key, ban_scope, reason
@@ -2175,18 +2191,40 @@ class DiscussionModerationViewSet(DeveloperErrorViewMixin, ViewSet):
             * If ban_user is true, a ban record will be created after content deletion
             * Reason is required when ban_user is true
             * Email notification is sent to partner-support upon ban
+            * Staff and privileged users cannot be banned
         """
         from lms.djangoapps.discussion.rest_api.serializers import BulkDeleteBanRequestSerializer
+        from lms.djangoapps.discussion.rest_api.utils import _is_privileged_user
 
-        serializer = BulkDeleteBanRequestSerializer(data=request.data)
+        serializer = BulkDeleteBanRequestSerializer(data=request.data, context={'request': request})
         if not serializer.is_valid():
             return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
         validated_data = serializer.validated_data
+        course_key = CourseKey.from_string(validated_data['course_id'])
+
+        try:
+            target_user = User.objects.get(id=validated_data['user_id'])
+        except User.DoesNotExist:
+            return Response(
+                {'error': f'User with ID {validated_data["user_id"]} does not exist'},
+                status=status.HTTP_404_NOT_FOUND
+            )
+
+        # Check if target user is staff/privileged - they shouldn't be banned
+        if validated_data['ban_user'] and _is_privileged_user(target_user, course_key):
+            return Response(
+                {
+                    'error': (
+                        f'Cannot ban staff or privileged users. User {target_user.username} '
+                        f'has elevated permissions in this course.'
+                    )
+                },
+                status=status.HTTP_400_BAD_REQUEST
+            )
 
         # Check if ban feature is enabled for this course
         if validated_data['ban_user']:
-            course_key = CourseKey.from_string(validated_data['course_id'])
             if not ENABLE_DISCUSSION_BAN.is_enabled(course_key):
                 return Response(
                     {'error': 'Discussion ban feature is not enabled for this course'},
@@ -2197,7 +2235,7 @@ class DiscussionModerationViewSet(DeveloperErrorViewMixin, ViewSet):
         task = delete_course_post_for_user.apply_async(
             kwargs={
                 'user_id': validated_data['user_id'],
-                'username': get_object_or_404(User, id=validated_data['user_id']).username,
+                'username': target_user.username,
                 'course_ids': [validated_data['course_id']],
                 'ban_user': validated_data['ban_user'],
                 'ban_scope': validated_data.get('ban_scope', 'course'),
@@ -2277,6 +2315,7 @@ class DiscussionModerationViewSet(DeveloperErrorViewMixin, ViewSet):
             * View all currently banned users in a course
             * Filter banned users by scope (course-level vs organization-level)
             * Audit moderation actions
+            * Unban users who were mistakenly banned (including staff)
 
         **Example Requests**
 
@@ -2286,13 +2325,16 @@ class DiscussionModerationViewSet(DeveloperErrorViewMixin, ViewSet):
         **Response Values**
 
             * count: Total number of active bans for the course
-            * results: Array of ban records with user information
+            * results: Array of ban records with user information (deduplicated)
 
         **Notes**
 
             * Only returns active bans (is_active=True)
             * Course-level bans are specific to one course
             * Organization-level bans apply to all courses in the organization
+            * Shows ALL banned users including staff (so they can be unbanned if mistakenly banned)
+            * Deduplicates users with multiple ban records (e.g., course-level + org-level)
+            * New bans of staff are prevented by validation in ban endpoints
         """
         from forum import api as forum_api
         from lms.djangoapps.discussion.rest_api.permissions import can_take_action_on_spam
@@ -2328,9 +2370,19 @@ class DiscussionModerationViewSet(DeveloperErrorViewMixin, ViewSet):
             scope=scope
         )
 
+        # Deduplicate by user_id (user may have both course-level and org-level bans)
+        # Keep the first occurrence (most relevant ban record)
+        seen_user_ids = set()
+        deduplicated_banned_users = []
+        for ban in banned_users_data:
+            user_id = ban.get('user', {}).get('id')
+            if user_id and user_id not in seen_user_ids:
+                seen_user_ids.add(user_id)
+                deduplicated_banned_users.append(ban)
+
         return Response({
-            'count': len(banned_users_data),
-            'results': banned_users_data
+            'count': len(deduplicated_banned_users),
+            'results': deduplicated_banned_users
         })
 
     @apidocs.schema(

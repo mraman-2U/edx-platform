@@ -202,6 +202,12 @@ class _ContentSerializer(serializers.Serializer):
     last_edit = serializers.SerializerMethodField(required=False)
     edit_reason_code = serializers.CharField(required=False, validators=[validate_edit_reason_code])
     edit_by_label = serializers.SerializerMethodField(required=False)
+    is_deleted = serializers.SerializerMethodField(read_only=True)
+    deleted_at = serializers.SerializerMethodField(read_only=True)
+    deleted_by = serializers.SerializerMethodField(read_only=True)
+    deleted_by_label = serializers.SerializerMethodField(read_only=True)
+    is_author_banned = serializers.SerializerMethodField(read_only=True)
+    author_ban_scope = serializers.SerializerMethodField(read_only=True)
 
     non_updatable_fields = set()
 
@@ -355,6 +361,106 @@ class _ContentSerializer(serializers.Serializer):
         if (is_user_author or is_user_privileged) and edit_history:
             last_edit = edit_history[-1]
             return self._get_user_label_from_username(last_edit.get('editor_username'))
+
+    def get_is_author_banned(self, obj):
+        """
+        Returns True if the content author is banned from discussions.
+        Returns False for anonymous content or if ban check fails.
+        """
+        from forum import api as forum_api
+
+        # Skip for anonymous content
+        if self._is_anonymous(obj) or obj.get("user_id") is None:
+            return False
+
+        # Skip if ban function not available
+        is_user_banned_func = getattr(forum_api, 'is_user_banned', None)
+        if not is_user_banned_func:
+            return False
+
+        try:
+            user = User.objects.get(id=int(obj["user_id"]))
+            course_id = self.context.get("course_id")
+            if course_id:
+                return is_user_banned_func(user, course_id)
+        except (User.DoesNotExist, ValueError, Exception):  # pylint: disable=broad-except
+            pass
+
+        return False
+
+    def get_author_ban_scope(self, obj):
+        """
+        Returns the scope of the author's ban ('course' or 'organization').
+        Returns None for anonymous content, unbanned users, or if check fails.
+        """
+        from forum import api as forum_api
+        import logging
+        logger = logging.getLogger(__name__)
+
+        # Skip for anonymous content
+        if self._is_anonymous(obj) or obj.get("user_id") is None:
+            return None
+
+        # Skip if required functions not available
+        is_user_banned_func = getattr(forum_api, 'is_user_banned', None)
+        get_user_bans_func = getattr(forum_api, 'get_user_bans', None)
+        if not is_user_banned_func:
+            return None
+
+        try:
+            user = User.objects.get(id=int(obj["user_id"]))
+            course_id = self.context.get("course_id")
+            if not course_id:
+                return None
+
+            # First check if user is banned at all
+            if not is_user_banned_func(user, course_id):
+                return None
+
+            logger.info("[BAN_SCOPE_DEBUG] User %s is banned, determining scope...", user.username)
+
+            # Try to get all active bans for this user and course
+            if get_user_bans_func:
+                try:
+                    bans = get_user_bans_func(user=user, course_id=course_id)
+                    logger.info("[BAN_SCOPE_DEBUG] get_user_bans returned: %s", bans)
+                    # Check for organization-level ban first (higher precedence)
+                    for ban in bans:
+                        if ban.get('is_active') and ban.get('scope') == 'organization':
+                            logger.info("[BAN_SCOPE_DEBUG] Found org ban: %s", ban)
+                            return 'organization'
+                    # Then check for course-level ban
+                    for ban in bans:
+                        if ban.get('is_active') and ban.get('scope') == 'course':
+                            logger.info("[BAN_SCOPE_DEBUG] Found course ban: %s", ban)
+                            return 'course'
+                except Exception as e:  # pylint: disable=broad-except
+                    logger.info("[BAN_SCOPE_DEBUG] get_user_bans failed: %s", e)
+
+            # Fallback: Try checking each scope individually using is_user_banned
+            # check_org parameter: True = include org checks, False = course-only
+            logger.info("[BAN_SCOPE_DEBUG] Trying fallback with is_user_banned...")
+            try:
+                # Check course-only (check_org=False means don't check org)
+                course_only = is_user_banned_func(user, course_id, check_org=False)
+                logger.info("[BAN_SCOPE_DEBUG] is_user_banned(check_org=False) course-only: %s", course_only)
+
+                # If course-only check returns False but user IS banned, must be org-banned
+                if not course_only:
+                    logger.info("[BAN_SCOPE_DEBUG] Not course-banned, therefore org-banned")
+                    return 'organization'
+
+                # If course-only check returns True, it's course-level ban
+                logger.info("[BAN_SCOPE_DEBUG] Course-level ban detected")
+                return 'course'
+            except TypeError as e:
+                # check_org parameter might not exist in older versions
+                logger.info("[BAN_SCOPE_DEBUG] check_org parameter not supported: %s", e)
+
+        except (User.DoesNotExist, ValueError, Exception) as e:  # pylint: disable=broad-except
+            logger.error("[BAN_SCOPE_DEBUG] Error: %s", e)
+
+        return None
 
 
 class ThreadSerializer(_ContentSerializer):

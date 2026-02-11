@@ -7,8 +7,8 @@ from celery import shared_task
 from django.contrib.auth import get_user_model
 from django.db import transaction
 from edx_django_utils.monitoring import set_code_owner_attribute
-from opaque_keys.edx.locator import CourseKey
 from eventtracking import tracker
+from opaque_keys.edx.keys import CourseKey
 
 from common.djangoapps.student.roles import CourseStaffRole, CourseInstructorRole
 from common.djangoapps.track import segment
@@ -141,75 +141,98 @@ def delete_course_post_for_user(  # pylint: disable=too-many-statements
             username = user.username
 
         log.info(
-            "Task %s: Deleting posts for user=%s, courses=%s, ban=%s",
-            self.request.id, username, course_ids, ban_user
+            f"<<Bulk Delete>> Deleting all posts for {username} in course {course_ids}"
         )
 
-        # Phase 1: Delete content (EXISTING - unchanged)
-        threads_deleted = Thread.delete_user_threads(user_id, course_ids)
-        comments_deleted = Comment.delete_user_comments(user_id, course_ids)
+        # Phase 1: Delete content with audit trail
+        deleted_by_user_id = event_data.get("triggered_by_user_id") if event_data else None
+        threads_deleted = Thread.delete_user_threads(
+            user_id, course_ids, deleted_by=deleted_by_user_id
+        )
+        comments_deleted = Comment.delete_user_comments(
+            user_id, course_ids, deleted_by=deleted_by_user_id
+        )
 
         log.info(
-            "Task %s: Deleted %d threads and %d comments for %s in courses %s",
-            self.request.id, threads_deleted, comments_deleted, username, course_ids
+            f"<<Bulk Delete>> Deleted {threads_deleted} posts and {comments_deleted} comments for {username} "
+            f"in course {course_ids}"
         )
 
-        # Phase 2: Create ban record (NEW - only if ban_user=True)
+        # Phase 2: Create ban record (only if ban_user=True)
+        ban_id = None
+        ban_error = None
         if ban_user and moderator_id:
+            try:
+                from forum import api as forum_api
+
+                with transaction.atomic():
+                    banned_user = User.objects.get(id=user_id)
+                    moderator = User.objects.get(id=moderator_id)
+
+                    # Extract organization from course for consistency
+                    course_key = CourseKey.from_string(course_ids[0])
+
+                    # Use forum API to ban user
+                    ban_result = forum_api.ban_user(
+                        user=banned_user,
+                        banned_by=moderator,
+                        course_id=course_key,
+                        scope=ban_scope,
+                        reason=reason or 'Bulk delete and ban operation'
+                    )
+
+                    ban_id = ban_result.get('id')
+
+                    log.info(
+                        f"<<Bulk Delete>> Created {ban_scope}-level ban (ID: {ban_id}) "
+                        f"for user {username} (ID: {user_id})"
+                    )
+
+            except Exception as e:  # pylint: disable=broad-except
+                ban_error = str(e)
+                log.error(
+                    f"<<Bulk Delete>> Failed to create ban for user {username} (ID: {user_id}): {e}",
+                    exc_info=True
+                )
+                # Don't fail the entire task if ban creation fails
+
+        # Phase 3: Audit logging
+        if ban_user and moderator_id and ban_id:
             from forum import api as forum_api
 
-            with transaction.atomic():
-                banned_user = User.objects.get(id=user_id)
-                moderator = User.objects.get(id=moderator_id)
+            try:
+                with transaction.atomic():
+                    forum_api.create_audit_log(
+                        action_type='ban_user',
+                        target_user=User.objects.get(id=user_id),
+                        moderator=User.objects.get(id=moderator_id),
+                        course_id=course_ids[0],
+                        scope=ban_scope,
+                        reason=reason,
+                        metadata={
+                            'threads_deleted': threads_deleted,
+                            'comments_deleted': comments_deleted,
+                            'task_id': self.request.id,
+                            'ban_id': ban_id,
+                        }
+                    )
+            except Exception as e:  # pylint: disable=broad-except
+                log.error(f"Failed to create audit log: {e}", exc_info=True)
 
-                # Extract organization from course for consistency
-                course_key = CourseKey.from_string(course_ids[0])
-
-                # Use forum API to ban user
-                ban_result = forum_api.ban_user(
-                    user=banned_user,
-                    banned_by=moderator,
-                    course_id=course_key,
-                    scope=ban_scope,
-                    reason=reason or 'No reason provided'
-                )
-
-                log.info(
-                    "Task %s: Created/updated ban (id=%d) for user=%s, scope=%s",
-                    self.request.id, ban_result.get('id', 0), username, ban_scope
-                )
-
-        # Phase 3: Audit logging (NEW)
-        if ban_user and moderator_id:
-            from forum import api as forum_api
-
-            with transaction.atomic():
-                forum_api.create_audit_log(
-                    action_type='ban_user',
-                    target_user=User.objects.get(id=user_id),
-                    moderator=User.objects.get(id=moderator_id),
-                    course_id=course_ids[0],
-                    scope=ban_scope,
-                    reason=reason,
-                    metadata={
-                        'threads_deleted': threads_deleted,
-                        'comments_deleted': comments_deleted,
-                        'task_id': self.request.id,
-                    }
-                )
-
-        # Phase 4: Event tracking (ENHANCED)
+        # Phase 4: Event tracking
         event_data.update({
             "number_of_posts_deleted": threads_deleted,
             "number_of_comments_deleted": comments_deleted,
             'ban_applied': ban_user,
             'ban_scope': ban_scope if ban_user else None,
+            'ban_id': ban_id if ban_id else None,
+            'ban_error': ban_error if ban_error else None,
         })
         event_name = 'edx.discussion.bulk_delete_user_posts'
         tracker.emit(event_name, event_data)
         segment.track('None', event_name, event_data)
 
-        # Phase 5: Email notification (NEW)
+        # Phase 5: Email notification
         if ban_user and moderator_id:
             # Check if email notifications are enabled before attempting to send
             from django.conf import settings as django_settings
