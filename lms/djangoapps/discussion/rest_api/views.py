@@ -2073,10 +2073,15 @@ class DiscussionModerationViewSet(DeveloperErrorViewMixin, ViewSet):
         )
 
         # Unban using forum API
+        # For org-level bans, pass course_id=None to fully unban across org
+        # (passing course_id for org ban creates an exception instead)
+        # NOTE: The newer /moderation/{pk}/unban/ endpoint (line ~2912) correctly
+        # supports optional course_id for creating exceptions. This older endpoint
+        # should always fully unban when scope='organization'.
         unban_result = forum_api.unban_user(
             user=user,
             unbanned_by=request.user,
-            course_id=course_key,
+            course_id=course_key if ban_scope == 'course' else None,
             scope=ban_scope
         )
 
