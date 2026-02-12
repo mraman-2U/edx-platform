@@ -38,6 +38,7 @@ from lms.djangoapps.courseware.exceptions import CourseAccessRedirect
 from lms.djangoapps.discussion.rate_limit import is_content_creation_rate_limited
 from lms.djangoapps.discussion.toggles import (
     ENABLE_DISCUSSIONS_MFE,
+    ENABLE_DISCUSSION_BAN,
     ONLY_VERIFIED_USERS_CAN_POST,
 )
 from lms.djangoapps.discussion.views import is_privileged_user
@@ -347,7 +348,8 @@ def get_course(request, course_key, check_tab=True):
     # Check if the user is banned from discussions
     is_user_banned_func = getattr(forum_api, 'is_user_banned', None)
     is_user_banned = False
-    if is_user_banned_func is not None:
+    # Only check ban status if feature flag is enabled
+    if ENABLE_DISCUSSION_BAN.is_enabled(course_key) and is_user_banned_func is not None:
         try:
             is_user_banned = is_user_banned_func(request.user, course_key)
         except Exception:  # pylint: disable=broad-except
@@ -1513,7 +1515,7 @@ def create_thread(request, thread_data):
 
     # Check if user is banned from discussions
     is_user_banned = getattr(forum_api, 'is_user_banned', None)
-    if is_user_banned and is_user_banned(user, course_key):
+    if ENABLE_DISCUSSION_BAN.is_enabled(course_key) and is_user_banned and is_user_banned(user, course_key):
         raise PermissionDenied("You are banned from posting in this course's discussions.")
 
     notify_all_learners = thread_data.pop("notify_all_learners", False)
@@ -1574,7 +1576,7 @@ def create_comment(request, comment_data):
 
     # Check if user is banned from discussions
     is_user_banned = getattr(forum_api, 'is_user_banned', None)
-    if is_user_banned and is_user_banned(request.user, course.id):
+    if ENABLE_DISCUSSION_BAN.is_enabled(course.id) and is_user_banned and is_user_banned(request.user, course.id):
         raise PermissionDenied("You are banned from posting in this course's discussions.")
 
     # if a thread is closed; no new comments could be made to it
@@ -1968,7 +1970,8 @@ def get_course_discussion_user_stats(
     # Get all active bans for this course using forum API
     get_banned_usernames = getattr(forum_api, 'get_banned_usernames', None)
     banned_usernames = []
-    if get_banned_usernames is not None:
+    # Only filter banned users if feature flag is enabled
+    if ENABLE_DISCUSSION_BAN.is_enabled(course_key) and get_banned_usernames is not None:
         banned_usernames = get_banned_usernames(
             course_id=course_key,
             org_key=course_key.org

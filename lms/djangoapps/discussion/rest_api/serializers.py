@@ -368,6 +368,7 @@ class _ContentSerializer(serializers.Serializer):
         Returns False for anonymous content or if ban check fails.
         """
         from forum import api as forum_api
+        from lms.djangoapps.discussion.toggles import ENABLE_DISCUSSION_BAN
 
         # Skip for anonymous content
         if self._is_anonymous(obj) or obj.get("user_id") is None:
@@ -378,9 +379,13 @@ class _ContentSerializer(serializers.Serializer):
         if not is_user_banned_func:
             return False
 
+        # Skip if feature flag is not enabled
+        course_id = self.context.get("course_id")
+        if not course_id or not ENABLE_DISCUSSION_BAN.is_enabled(course_id):
+            return False
+
         try:
             user = User.objects.get(id=int(obj["user_id"]))
-            course_id = self.context.get("course_id")
             if course_id:
                 return is_user_banned_func(user, course_id)
         except (User.DoesNotExist, ValueError, Exception):  # pylint: disable=broad-except
@@ -394,6 +399,7 @@ class _ContentSerializer(serializers.Serializer):
         Returns None for anonymous content, unbanned users, or if check fails.
         """
         from forum import api as forum_api
+        from lms.djangoapps.discussion.toggles import ENABLE_DISCUSSION_BAN
         import logging
         logger = logging.getLogger(__name__)
 
@@ -407,9 +413,13 @@ class _ContentSerializer(serializers.Serializer):
         if not is_user_banned_func:
             return None
 
+        # Skip if feature flag is not enabled
+        course_id = self.context.get("course_id")
+        if not course_id or not ENABLE_DISCUSSION_BAN.is_enabled(course_id):
+            return None
+
         try:
             user = User.objects.get(id=int(obj["user_id"]))
-            course_id = self.context.get("course_id")
             if not course_id:
                 return None
 
