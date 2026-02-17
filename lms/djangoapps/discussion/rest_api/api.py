@@ -405,8 +405,13 @@ def get_course(request, course_key, check_tab=True):
             'site_key': get_captcha_site_key_by_platform('web'),
         },
         "is_email_verified": request.user.is_active,
-        "only_verified_users_can_post": ONLY_VERIFIED_USERS_CAN_POST.is_enabled(course_key),
-        "content_creation_rate_limited": is_content_creation_rate_limited(request, course_key, increment=False),
+        "only_verified_users_can_post": ONLY_VERIFIED_USERS_CAN_POST.is_enabled(
+            course_key
+        ),
+        "content_creation_rate_limited": is_content_creation_rate_limited(
+            request, course_key, increment=False
+        ),
+        "enable_discussion_ban": ENABLE_DISCUSSION_BAN.is_enabled(course_key),
     }
 
 
