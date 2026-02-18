@@ -643,6 +643,7 @@ class CourseViewTest(DiscussionAPIViewTestMixin, ModuleStoreTestCase):
                 "is_email_verified": True,
                 "only_verified_users_can_post": False,
                 "content_creation_rate_limited": False,
+                "enable_discussion_ban": False,
             },
         )
 
