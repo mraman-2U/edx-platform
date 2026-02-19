@@ -76,12 +76,8 @@ def get_context(course, request, thread=None):
     cc_requester["course_id"] = course.id
     course_discussion_settings = CourseDiscussionSettings.get(course.id)
     is_global_staff = GlobalStaff().has_user(requester)
-    has_moderation_privilege = (
-        requester.id in moderator_user_ids or
-        requester.id in ta_user_ids or
-        requester.id in course_staff_user_ids or
-        is_global_staff
-    )
+    all_privileged_ids = set(moderator_user_ids) | set(ta_user_ids) | set(course_staff_user_ids)
+    has_moderation_privilege = requester.id in all_privileged_ids or is_global_staff
     return {
         "course": course,
         "course_id": course.id,

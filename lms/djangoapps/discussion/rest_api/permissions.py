@@ -255,17 +255,15 @@ class IsAllowedToBulkDelete(permissions.BasePermission):
         Returns True if the user can bulk delete posts and ban users.
 
         For ViewSet actions, course_id may come from:
-        1. URL kwargs (view.kwargs.get('course_id'))
-        2. Query parameters (request.query_params.get('course_id'))
-        3. Request body (request.data.get('course_id'))
+        1. URL kwargs (view.kwargs.get('course_id')) - for URL path parameters
+        2. Request body (request.data.get('course_id')) - for POST request bodies
         """
         if not request.user.is_authenticated:
             return False
 
-        # Try to get course_id from different sources
+        # Try to get course_id from URL kwargs or request data
         course_id = (
             view.kwargs.get("course_id") or
-            request.query_params.get("course_id") or
             (request.data.get("course_id") if hasattr(request, 'data') else None)
         )
 

@@ -112,7 +112,6 @@ class IsAllowedToBulkDeleteTest(ModuleStoreTestCase):
 
         request.user = user
         request.data = {'course_id': course_id} if course_id else {}
-        request.query_params = {'course_id': course_id} if course_id and method == 'GET' else {}
         return request
 
     def test_unauthenticated_user_denied(self):
@@ -176,15 +175,6 @@ class IsAllowedToBulkDeleteTest(ModuleStoreTestCase):
         request.data = {}
         request.query_params = {}
         view = self._create_view_with_kwargs(self.course_key)
-
-        self.assertTrue(self.permission.has_permission(request, view))
-
-    def test_course_id_in_query_params(self):
-        """Permission should work when course_id is in query parameters."""
-        user = UserFactory.create()
-        CourseStaffRole(self.course.id).add_users(user)
-        request = self._create_request_with_data(user, self.course_key, method='GET')
-        view = self._create_view_with_kwargs()
 
         self.assertTrue(self.permission.has_permission(request, view))
 
