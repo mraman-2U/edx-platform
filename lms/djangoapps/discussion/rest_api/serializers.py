@@ -801,6 +801,7 @@ class CommentSerializer(_ContentSerializer):
             data["parent_id"] = None
 
         return data
+
     def get_abuse_flagged_any_user(self, obj):
         """
         Returns a boolean indicating whether any user has flagged the
@@ -1059,6 +1060,8 @@ class UserStatsSerializer(serializers.Serializer):
             data["active_flags"] = None
             data["inactive_flags"] = None
         return data
+
+
 class BlackoutDateSerializer(serializers.Serializer):
     """
     Serializer for blackout dates.
@@ -1209,6 +1212,8 @@ class BulkDeleteBanRequestSerializer(serializers.Serializer):
                 })
 
         return data
+
+
 class BanUserRequestSerializer(serializers.Serializer):
     """
     Request payload for standalone ban action (without bulk delete).
