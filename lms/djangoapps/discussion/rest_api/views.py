@@ -5,7 +5,7 @@ import logging
 import uuid
 
 import edx_api_doc_tools as apidocs
-
+from opaque_keys import InvalidKeyError
 from django.contrib.auth import get_user_model
 from django.core.exceptions import BadRequest, ValidationError
 from django.shortcuts import get_object_or_404
@@ -1716,7 +1716,13 @@ class DiscussionModerationViewSet(DeveloperErrorViewMixin, ViewSet):
         ban_scope = serializer_data.get('scope', 'course')
         reason = serializer_data.get('reason', '').strip()
 
-        course_key = CourseKey.from_string(course_id_str)
+        try:
+            course_key = CourseKey.from_string(course_id_str)
+        except InvalidKeyError:
+            return Response(
+                {'error': f'Invalid course_id: {course_id_str}'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
 
         try:
             if user_id:
@@ -2206,7 +2212,13 @@ class DiscussionModerationViewSet(DeveloperErrorViewMixin, ViewSet):
             return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
         validated_data = serializer.validated_data
-        course_key = CourseKey.from_string(validated_data['course_id'])
+        try:
+            course_key = CourseKey.from_string(validated_data['course_id'])
+        except InvalidKeyError:
+            return Response(
+                {'error': f"Invalid course_id: {validated_data['course_id']}"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
 
         try:
             target_user = User.objects.get(id=validated_data['user_id'])
@@ -2350,7 +2362,13 @@ class DiscussionModerationViewSet(DeveloperErrorViewMixin, ViewSet):
                 status=status.HTTP_400_BAD_REQUEST
             )
 
-        course_key = CourseKey.from_string(course_id)
+        try:
+            course_key = CourseKey.from_string(course_id)
+        except InvalidKeyError:
+            return Response(
+                {'error': f'Invalid course_id: {course_id}'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
 
         # Permission check: user must be able to moderate in this course
         if not can_take_action_on_spam(request.user, course_key):
@@ -2496,6 +2514,16 @@ class DiscussionModerationViewSet(DeveloperErrorViewMixin, ViewSet):
 
         course_id = request.data.get('course_id')
         reason = request.data.get('reason', '').strip()
+        parsed_course_key = None
+
+        if course_id:
+            try:
+                parsed_course_key = CourseKey.from_string(course_id)
+            except InvalidKeyError:
+                return Response(
+                    {'error': f'Invalid course_id: {course_id}'},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
 
         # Import dependencies
         from common.djangoapps.student.roles import GlobalStaff
@@ -2514,7 +2542,7 @@ class DiscussionModerationViewSet(DeveloperErrorViewMixin, ViewSet):
             # Org-level ban
             if course_id:
                 # Creating exception for specific course - check permissions in that course
-                if not can_take_action_on_spam(request.user, course_id):
+                if not can_take_action_on_spam(request.user, parsed_course_key):
                     return Response(
                         {'error': 'You do not have permission to create exceptions in this course'},
                         status=status.HTTP_403_FORBIDDEN
@@ -2534,7 +2562,7 @@ class DiscussionModerationViewSet(DeveloperErrorViewMixin, ViewSet):
             course_key_for_flag = CourseKey.from_string(ban_course_id)
         elif course_id:
             # Org-level ban with course exception - use provided course_id
-            course_key_for_flag = CourseKey.from_string(course_id)
+            course_key_for_flag = parsed_course_key
         elif ban.get('scope') == 'organization' and ban.get('org_key'):
             # Org-level ban without course_id - find any course in org to check flag
             from openedx.core.djangoapps.content.course_overviews.models import CourseOverview

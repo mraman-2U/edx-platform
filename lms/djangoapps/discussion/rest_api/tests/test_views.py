@@ -2314,6 +2314,9 @@ class DiscussionModerationViewSetUnitTests(APITestCase):
         def get_or_create_ban_proxy(self, user, course_key, ban_scope, reason, request):
             return self._get_or_create_ban(user, course_key, ban_scope, reason, request)
 
+        def validate_ban_request_proxy(self, request, serializer_data):
+            return self._validate_ban_request_and_get_user(request, serializer_data)
+
     def setUp(self):
         super().setUp()
         self.viewset = self._DiscussionModerationViewSetTestProxy()
@@ -2325,9 +2328,10 @@ class DiscussionModerationViewSetUnitTests(APITestCase):
     @ddt.data(("course", False), ("organization", True))
     @ddt.unpack
     def test_get_or_create_ban_uses_expected_check_org(self, ban_scope, check_org):
-        with mock.patch("forum.api.is_user_banned", return_value=False) as is_user_banned, mock.patch(
+        with mock.patch("forum.api.is_user_banned", return_value=False, create=True) as is_user_banned, mock.patch(
             "forum.api.ban_user",
             return_value={"id": 1, "reactivated": False},
+            create=True,
         ):
             self.viewset.get_or_create_ban_proxy(
                 user=self.user,
@@ -2342,6 +2346,65 @@ class DiscussionModerationViewSetUnitTests(APITestCase):
             self.course_key,
             check_org=check_org,
         )
+
+    def test_validate_ban_request_invalid_course_id_returns_400(self):
+        result = self.viewset.validate_ban_request_proxy(
+            request=self.request,
+            serializer_data={
+                "user_id": self.user.id,
+                "course_id": "invalid-course-id",
+                "scope": "course",
+                "reason": "",
+            },
+        )
+
+        assert result.status_code == status.HTTP_400_BAD_REQUEST
+        assert result.data == {"error": "Invalid course_id: invalid-course-id"}
+
+    def test_bulk_delete_ban_invalid_course_id_returns_400(self):
+        request = mock.Mock(user=self.moderator, data={})
+        serializer_instance = mock.Mock()
+        serializer_instance.is_valid.return_value = True
+        serializer_instance.validated_data = {
+            "user_id": self.user.id,
+            "course_id": "invalid-course-id",
+            "ban_user": False,
+            "ban_scope": "course",
+            "reason": "",
+        }
+
+        with mock.patch(
+            "lms.djangoapps.discussion.rest_api.serializers.BulkDeleteBanRequestSerializer",
+            return_value=serializer_instance,
+        ):
+            response = self.viewset.bulk_delete_ban(request)
+
+        assert response.status_code == status.HTTP_400_BAD_REQUEST
+        assert response.data == {"error": "Invalid course_id: invalid-course-id"}
+
+    def test_banned_users_invalid_course_id_returns_400(self):
+        request = mock.Mock(user=self.moderator, query_params={})
+
+        response = self.viewset.banned_users(request, course_id="invalid-course-id")
+
+        assert response.status_code == status.HTTP_400_BAD_REQUEST
+        assert response.data == {"error": "Invalid course_id: invalid-course-id"}
+
+    def test_unban_user_by_id_invalid_course_id_returns_400(self):
+        request = mock.Mock(
+            user=self.moderator,
+            data={"course_id": "invalid-course-id", "reason": "appeal approved"},
+        )
+
+        with mock.patch(
+            "forum.api.get_ban",
+            return_value={"is_active": True, "course_id": None, "scope": "organization", "org_key": "x"},
+            create=True,
+        ):
+            response = self.viewset.unban_user_by_id(request, pk=1)
+
+        assert response.status_code == status.HTTP_400_BAD_REQUEST
+        assert response.data == {"error": "Invalid course_id: invalid-course-id"}
 
 
 @mock.patch.dict("django.conf.settings.FEATURES", {"ENABLE_DISCUSSION_SERVICE": True})

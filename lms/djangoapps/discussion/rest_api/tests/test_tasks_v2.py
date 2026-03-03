@@ -816,6 +816,7 @@ class TestDeleteCoursePostForUserTask(ModuleStoreTestCase):
         ), mock.patch(
             'forum.api.ban_user',
             return_value={'id': 42},
+            create=True,
         ) as mock_ban_user, mock.patch(
             'lms.djangoapps.discussion.rest_api.emails.send_ban_escalation_email',
             side_effect=Exception('email failure'),

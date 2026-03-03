@@ -53,7 +53,7 @@ urlpatterns = [
         name='discussion-moderation-bulk-delete-ban'
     ),
     re_path(
-        fr'^v1/moderation/banned-users/{settings.COURSE_ID_PATTERN}$',
+        fr'^v1/moderation/banned-users/{settings.COURSE_ID_PATTERN}/?$',
         DiscussionModerationViewSet.as_view({'get': 'banned_users'}),
         name='discussion-moderation-banned-users'
     ),
