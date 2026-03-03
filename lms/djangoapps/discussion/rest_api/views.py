@@ -1627,7 +1627,7 @@ class DiscussionModerationViewSet(DeveloperErrorViewMixin, ViewSet):
     **Example Requests**
 
         POST /api/discussion/v1/moderation/bulk-delete-ban/
-        GET /api/discussion/v1/moderation/banned-users/?course_id=course-v1:edX+DemoX+Demo
+        GET /api/discussion/v1/moderation/banned-users/course-v1:edX+DemoX+Demo
         POST /api/discussion/v1/moderation/123/unban/
     """
 
@@ -1651,15 +1651,15 @@ class DiscussionModerationViewSet(DeveloperErrorViewMixin, ViewSet):
     @apidocs.schema(
         body=openapi.Schema(
             type=openapi.TYPE_OBJECT,
-            required=['user_id', 'course_id'],
+            required=['course_id'],
             properties={
                 'user_id': openapi.Schema(
                     type=openapi.TYPE_INTEGER,
-                    description='ID of the user to ban (either user_id or username required)'
+                    description='ID of the user to ban (required if username is not provided)'
                 ),
                 'username': openapi.Schema(
                     type=openapi.TYPE_STRING,
-                    description='Username of the user to ban (either user_id or username required)'
+                    description='Username of the user to ban (required if user_id is not provided)'
                 ),
                 'course_id': openapi.Schema(
                     type=openapi.TYPE_STRING,
@@ -1788,7 +1788,7 @@ class DiscussionModerationViewSet(DeveloperErrorViewMixin, ViewSet):
         from forum import api as forum_api
 
         # Check if already banned
-        if forum_api.is_user_banned(user, course_key, check_org=(ban_scope == 'course')):
+        if forum_api.is_user_banned(user, course_key, check_org=(ban_scope == 'organization')):
             existing_ban = forum_api.get_ban(
                 user=user,
                 course_id=course_key,
@@ -1933,15 +1933,15 @@ class DiscussionModerationViewSet(DeveloperErrorViewMixin, ViewSet):
     @apidocs.schema(
         body=openapi.Schema(
             type=openapi.TYPE_OBJECT,
-            required=['user_id', 'course_id', 'scope'],
+            required=['course_id', 'scope'],
             properties={
                 'user_id': openapi.Schema(
                     type=openapi.TYPE_INTEGER,
-                    description='ID of the user to unban'
+                    description='ID of the user to unban (required if username is not provided)'
                 ),
                 'username': openapi.Schema(
                     type=openapi.TYPE_STRING,
-                    description='Username of the user to unban (alternative to user_id)'
+                    description='Username of the user to unban (required if user_id is not provided)'
                 ),
                 'course_id': openapi.Schema(
                     type=openapi.TYPE_STRING,
@@ -2264,8 +2264,8 @@ class DiscussionModerationViewSet(DeveloperErrorViewMixin, ViewSet):
         parameters=[
             apidocs.string_parameter(
                 'course_id',
-                apidocs.ParameterLocation.QUERY,
-                description='Course ID to filter banned users (required)'
+                apidocs.ParameterLocation.PATH,
+                description='Course ID to retrieve banned users for (required)'
             ),
             apidocs.string_parameter(
                 'scope',

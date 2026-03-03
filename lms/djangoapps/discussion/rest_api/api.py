@@ -1519,8 +1519,19 @@ def create_thread(request, thread_data):
         raise DiscussionBlackOutException
 
     # Check if user is banned from discussions
-    is_user_banned = getattr(forum_api, 'is_user_banned', None)
-    if ENABLE_DISCUSSION_BAN.is_enabled(course_key) and is_user_banned and is_user_banned(user, course_key):
+    is_user_banned_func = getattr(forum_api, 'is_user_banned', None)
+    user_banned = False
+    if ENABLE_DISCUSSION_BAN.is_enabled(course_key) and is_user_banned_func:
+        try:
+            user_banned = is_user_banned_func(user, course_key)
+        except (CommentClientRequestError, CommentClient500Error) as exc:
+            log.warning(
+                "Error while checking discussion ban status for user %s in course %s: %s",
+                getattr(user, "id", None),
+                course_key,
+                exc,
+            )
+    if user_banned:
         raise PermissionDenied("You are banned from posting in this course's discussions.")
 
     notify_all_learners = thread_data.pop("notify_all_learners", False)
@@ -1580,8 +1591,19 @@ def create_comment(request, comment_data):
         raise DiscussionBlackOutException
 
     # Check if user is banned from discussions
-    is_user_banned = getattr(forum_api, 'is_user_banned', None)
-    if ENABLE_DISCUSSION_BAN.is_enabled(course.id) and is_user_banned and is_user_banned(request.user, course.id):
+    is_user_banned_func = getattr(forum_api, 'is_user_banned', None)
+    user_banned = False
+    if ENABLE_DISCUSSION_BAN.is_enabled(course.id) and is_user_banned_func:
+        try:
+            user_banned = is_user_banned_func(request.user, course.id)
+        except (CommentClientRequestError, CommentClient500Error) as exc:
+            log.warning(
+                "Error while checking discussion ban status for user %s in course %s: %s",
+                getattr(request.user, "id", None),
+                course.id,
+                exc,
+            )
+    if user_banned:
         raise PermissionDenied("You are banned from posting in this course's discussions.")
 
     # if a thread is closed; no new comments could be made to it
@@ -1977,10 +1999,17 @@ def get_course_discussion_user_stats(
     banned_usernames = []
     # Only filter banned users if feature flag is enabled
     if ENABLE_DISCUSSION_BAN.is_enabled(course_key) and get_banned_usernames is not None:
-        banned_usernames = get_banned_usernames(
-            course_id=course_key,
-            org_key=course_key.org
-        )
+        try:
+            banned_usernames = get_banned_usernames(
+                course_id=course_key,
+                org_key=course_key.org
+            )
+        except Exception:  # pylint: disable=broad-except
+            log.exception(
+                "Error retrieving banned usernames for course %s; returning unfiltered discussion stats.",
+                course_key,
+            )
+            banned_usernames = []
 
     # Filter out banned users from the stats
     if banned_usernames:

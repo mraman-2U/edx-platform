@@ -47,7 +47,11 @@ from lms.djangoapps.discussion.rest_api.tests.utils import (
     make_minimal_cs_comment,
     make_minimal_cs_thread,
 )
+from lms.djangoapps.discussion.rest_api.serializers import (
+    BulkDeleteBanRequestSerializer,
+)
 from lms.djangoapps.discussion.rest_api.utils import get_usernames_from_search_string
+from lms.djangoapps.discussion.rest_api.views import DiscussionModerationViewSet
 from lms.djangoapps.discussion.toggles import ENABLE_DISCUSSIONS_MFE
 from openedx.core.djangoapps.course_groups.tests.helpers import config_course_cohorts
 from openedx.core.djangoapps.discussions.config.waffle import (
@@ -74,6 +78,9 @@ from openedx.core.djangoapps.oauth_dispatch.tests.factories import (
 from openedx.core.djangoapps.user_api.models import (
     RetirementState,
     UserRetirementStatus,
+)
+from openedx.core.djangoapps.django_comment_common.comment_client.utils import (
+    CommentClientRequestError,
 )
 from xmodule.modulestore import ModuleStoreEnum
 from xmodule.modulestore.django import modulestore
@@ -2274,3 +2281,105 @@ class CourseActivityStatsTest(
             self.course_key, username_search_string, 1, 1
         )
         assert response == (username_search_string.lower(), 1, 1)
+
+    @mock.patch.dict(
+        "django.conf.settings.FEATURES", {"ENABLE_DISCUSSION_SERVICE": True}
+    )
+    def test_banned_username_lookup_error_fails_open(self):
+        """Stats endpoint should not fail when banned-username lookup backend errors."""
+        self.client.login(username=self.user.username, password=self.TEST_PASSWORD)
+        with mock.patch(
+            "lms.djangoapps.discussion.rest_api.api.ENABLE_DISCUSSION_BAN.is_enabled",
+            return_value=True,
+        ), mock.patch(
+            "lms.djangoapps.discussion.rest_api.api.forum_api.get_banned_usernames",
+            side_effect=CommentClientRequestError("temporary backend failure"),
+            create=True,
+        ):
+            response = self.client.get(self.url)
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["results"] == self.stats_without_flags
+
+
+@mock.patch.dict("django.conf.settings.FEATURES", {"ENABLE_DISCUSSION_SERVICE": True})
+@ddt.ddt
+class DiscussionModerationViewSetUnitTests(APITestCase):
+    """Unit tests for DiscussionModerationViewSet helper behavior."""
+
+    class _DiscussionModerationViewSetTestProxy(DiscussionModerationViewSet):
+        """Test proxy exposing internal helper for unit testing."""
+
+        def get_or_create_ban_proxy(self, user, course_key, ban_scope, reason, request):
+            return self._get_or_create_ban(user, course_key, ban_scope, reason, request)
+
+    def setUp(self):
+        super().setUp()
+        self.viewset = self._DiscussionModerationViewSetTestProxy()
+        self.user = UserFactory.create()
+        self.moderator = UserFactory.create()
+        self.request = mock.Mock(user=self.moderator)
+        self.course_key = CourseKey.from_string("course-v1:x+y+z")
+
+    @ddt.data(("course", False), ("organization", True))
+    @ddt.unpack
+    def test_get_or_create_ban_uses_expected_check_org(self, ban_scope, check_org):
+        with mock.patch("forum.api.is_user_banned", return_value=False) as is_user_banned, mock.patch(
+            "forum.api.ban_user",
+            return_value={"id": 1, "reactivated": False},
+        ):
+            self.viewset.get_or_create_ban_proxy(
+                user=self.user,
+                course_key=self.course_key,
+                ban_scope=ban_scope,
+                reason="",
+                request=self.request,
+            )
+
+        is_user_banned.assert_called_once_with(
+            self.user,
+            self.course_key,
+            check_org=check_org,
+        )
+
+
+@mock.patch.dict("django.conf.settings.FEATURES", {"ENABLE_DISCUSSION_SERVICE": True})
+class BulkDeleteBanRequestSerializerUnitTests(APITestCase):
+    """Unit tests for BulkDeleteBanRequestSerializer validation behavior."""
+
+    def setUp(self):
+        super().setUp()
+        self.target_user = UserFactory.create()
+        self.course_id = "course-v1:x+y+z"
+
+    def test_org_scope_accepts_is_staff_when_ban_user_true(self):
+        acting_user = UserFactory.create(is_staff=True)
+        request = mock.Mock(user=acting_user)
+        serializer = BulkDeleteBanRequestSerializer(
+            data={
+                "user_id": self.target_user.id,
+                "course_id": self.course_id,
+                "ban_user": True,
+                "ban_scope": "organization",
+                "reason": "policy violation",
+            },
+            context={"request": request},
+        )
+
+        assert serializer.is_valid(), serializer.errors
+
+    def test_org_scope_skips_permission_check_when_ban_user_false(self):
+        acting_user = UserFactory.create(is_staff=False)
+        request = mock.Mock(user=acting_user)
+        serializer = BulkDeleteBanRequestSerializer(
+            data={
+                "user_id": self.target_user.id,
+                "course_id": self.course_id,
+                "ban_user": False,
+                "ban_scope": "organization",
+            },
+            context={"request": request},
+        )
+
+        assert serializer.is_valid(), serializer.errors

@@ -358,6 +358,20 @@ class _ContentSerializer(serializers.Serializer):
             last_edit = edit_history[-1]
             return self._get_user_label_from_username(last_edit.get('editor_username'))
 
+    def _get_author_ban_cache_key(self, course_id, user_id):
+        """Build a stable cache key for author ban lookups."""
+        return (str(course_id), int(user_id))
+
+    def _get_author_from_cache(self, user_id):
+        """Fetch author from per-request cache or database."""
+        user_cache = self.context.setdefault("_author_ban_user_cache", {})
+        if user_id not in user_cache:
+            try:
+                user_cache[user_id] = User.objects.get(id=user_id)
+            except User.DoesNotExist:
+                user_cache[user_id] = None
+        return user_cache[user_id]
+
     def get_is_author_banned(self, obj):
         """
         Returns True if the content author is banned from discussions.
@@ -381,11 +395,26 @@ class _ContentSerializer(serializers.Serializer):
             return False
 
         try:
-            user = User.objects.get(id=int(obj["user_id"]))
-            if course_id:
-                return is_user_banned_func(user, course_id)
+            user_id = int(obj["user_id"])
+        except (ValueError, TypeError):
+            return False
+
+        cache_key = self._get_author_ban_cache_key(course_id, user_id)
+        ban_status_cache = self.context.setdefault("_author_ban_status_cache", {})
+        if cache_key in ban_status_cache:
+            return ban_status_cache[cache_key]
+
+        try:
+            user = self._get_author_from_cache(user_id)
+            if not user:
+                ban_status_cache[cache_key] = False
+                return False
+
+            is_banned = is_user_banned_func(user, course_id)
+            ban_status_cache[cache_key] = is_banned
+            return is_banned
         except (User.DoesNotExist, ValueError, Exception):  # pylint: disable=broad-except
-            pass
+            ban_status_cache[cache_key] = False
 
         return False
 
@@ -415,57 +444,91 @@ class _ContentSerializer(serializers.Serializer):
             return None
 
         try:
-            user = User.objects.get(id=int(obj["user_id"]))
+            user_id = int(obj["user_id"])
+        except (ValueError, TypeError):
+            return None
+
+        cache_key = self._get_author_ban_cache_key(course_id, user_id)
+        ban_scope_cache = self.context.setdefault("_author_ban_scope_cache", {})
+        if cache_key in ban_scope_cache:
+            return ban_scope_cache[cache_key]
+
+        ban_status_cache = self.context.setdefault("_author_ban_status_cache", {})
+
+        try:
+            user = self._get_author_from_cache(user_id)
+            if not user:
+                ban_scope_cache[cache_key] = None
+                return None
+
             if not course_id:
+                ban_scope_cache[cache_key] = None
                 return None
 
             # First check if user is banned at all
-            if not is_user_banned_func(user, course_id):
-                return None
+            user_banned = ban_status_cache.get(cache_key)
+            if user_banned is None:
+                user_banned = is_user_banned_func(user, course_id)
+                ban_status_cache[cache_key] = user_banned
 
-            logger.info("[BAN_SCOPE_DEBUG] User %s is banned, determining scope...", user.username)
+            if not user_banned:
+                ban_scope_cache[cache_key] = None
+                return None
 
             # Try to get all active bans for this user and course
             if get_user_bans_func:
                 try:
                     bans = get_user_bans_func(user=user, course_id=course_id)
-                    logger.info("[BAN_SCOPE_DEBUG] get_user_bans returned: %s", bans)
                     # Check for organization-level ban first (higher precedence)
                     for ban in bans:
                         if ban.get('is_active') and ban.get('scope') == 'organization':
-                            logger.info("[BAN_SCOPE_DEBUG] Found org ban: %s", ban)
+                            ban_scope_cache[cache_key] = 'organization'
                             return 'organization'
                     # Then check for course-level ban
                     for ban in bans:
                         if ban.get('is_active') and ban.get('scope') == 'course':
-                            logger.info("[BAN_SCOPE_DEBUG] Found course ban: %s", ban)
+                            ban_scope_cache[cache_key] = 'course'
                             return 'course'
                 except Exception as e:  # pylint: disable=broad-except
-                    logger.info("[BAN_SCOPE_DEBUG] get_user_bans failed: %s", e)
+                    logger.debug(
+                        "Unable to fetch ban list for ban-scope detection. course_id=%s user_id=%s error=%s",
+                        course_id,
+                        obj.get("user_id"),
+                        e,
+                    )
 
             # Fallback: Try checking each scope individually using is_user_banned
             # check_org parameter: True = include org checks, False = course-only
-            logger.info("[BAN_SCOPE_DEBUG] Trying fallback with is_user_banned...")
             try:
                 # Check course-only (check_org=False means don't check org)
                 course_only = is_user_banned_func(user, course_id, check_org=False)
-                logger.info("[BAN_SCOPE_DEBUG] is_user_banned(check_org=False) course-only: %s", course_only)
 
                 # If course-only check returns False but user IS banned, must be org-banned
                 if not course_only:
-                    logger.info("[BAN_SCOPE_DEBUG] Not course-banned, therefore org-banned")
+                    ban_scope_cache[cache_key] = 'organization'
                     return 'organization'
 
                 # If course-only check returns True, it's course-level ban
-                logger.info("[BAN_SCOPE_DEBUG] Course-level ban detected")
+                ban_scope_cache[cache_key] = 'course'
                 return 'course'
             except TypeError as e:
                 # check_org parameter might not exist in older versions
-                logger.info("[BAN_SCOPE_DEBUG] check_org parameter not supported: %s", e)
+                logger.debug(
+                    "check_org parameter unsupported during ban-scope detection. course_id=%s user_id=%s error=%s",
+                    course_id,
+                    obj.get("user_id"),
+                    e,
+                )
 
         except (User.DoesNotExist, ValueError, Exception) as e:  # pylint: disable=broad-except
-            logger.error("[BAN_SCOPE_DEBUG] Error: %s", e)
+            logger.warning(
+                "Unable to determine author ban scope. course_id=%s user_id=%s error=%s",
+                self.context.get("course_id"),
+                obj.get("user_id"),
+                e,
+            )
 
+        ban_scope_cache[cache_key] = None
         return None
 
 
@@ -738,7 +801,6 @@ class CommentSerializer(_ContentSerializer):
             data["parent_id"] = None
 
         return data
-
     def get_abuse_flagged_any_user(self, obj):
         """
         Returns a boolean indicating whether any user has flagged the
@@ -997,8 +1059,6 @@ class UserStatsSerializer(serializers.Serializer):
             data["active_flags"] = None
             data["inactive_flags"] = None
         return data
-
-
 class BlackoutDateSerializer(serializers.Serializer):
     """
     Serializer for blackout dates.
@@ -1138,16 +1198,17 @@ class BulkDeleteBanRequestSerializer(serializers.Serializer):
                 })
 
         # Validate that organization-level bans require elevated permissions
-        if data.get('ban_scope') == 'organization':
+        # only when a ban is requested.
+        if data.get('ban_user') and data.get('ban_scope') == 'organization':
             request = self.context.get('request')
-            if request and not GlobalStaff().has_user(request.user):
+            if request and not (
+                GlobalStaff().has_user(request.user) or request.user.is_staff
+            ):
                 raise serializers.ValidationError({
                     'ban_scope': "Organization-level bans require global staff permissions."
                 })
 
         return data
-
-
 class BanUserRequestSerializer(serializers.Serializer):
     """
     Request payload for standalone ban action (without bulk delete).
@@ -1196,73 +1257,4 @@ class BanUserRequestSerializer(serializers.Serializer):
             # Don't validate user existence here - let the view return 404
             # Just record the username for the view to resolve
             data['lookup_username'] = data['username']
-
         return data
-
-
-class BannedUserSerializer(serializers.Serializer):
-    """Banned user information for list view."""
-
-    id = serializers.IntegerField(read_only=True)
-    username = serializers.CharField(source='user.username', read_only=True)
-    email = serializers.EmailField(source='user.email', read_only=True)
-    user_id = serializers.IntegerField(source='user.id', read_only=True)
-    course_id = serializers.CharField(read_only=True)
-    organization = serializers.CharField(source='org_key', read_only=True)
-    scope = serializers.CharField(read_only=True)
-    reason = serializers.CharField(read_only=True)
-    banned_at = serializers.DateTimeField(read_only=True)
-    banned_by_username = serializers.CharField(source='banned_by.username', read_only=True)
-    is_active = serializers.BooleanField(read_only=True)
-    threads = serializers.SerializerMethodField()
-    responses = serializers.SerializerMethodField()
-    replies = serializers.SerializerMethodField()
-    inactive_flags = serializers.SerializerMethodField()
-    active_flags = serializers.SerializerMethodField()
-
-    def _get_user_stats(self, obj):
-        """Get user stats for the banned user."""
-        try:
-            from forum import api as forum_api
-            course_id = str(obj.course_id) if obj.course_id else None
-            if not course_id:
-                return {}
-
-            # Get stats for this specific user
-            stats_response = forum_api.get_user_course_stats(
-                course_id,
-                usernames=obj.user.username
-            )
-
-            if stats_response and stats_response.get('user_stats'):
-                user_stats_list = stats_response['user_stats']
-                if user_stats_list and len(user_stats_list) > 0:
-                    return user_stats_list[0]
-            return {}
-        except Exception:  # pylint: disable=broad-exception-caught
-            return {}
-
-    def get_threads(self, obj):
-        """Get thread count for the user."""
-        stats = self._get_user_stats(obj)
-        return stats.get('threads', 0)
-
-    def get_responses(self, obj):
-        """Get response count for the user."""
-        stats = self._get_user_stats(obj)
-        return stats.get('responses', 0)
-
-    def get_replies(self, obj):
-        """Get reply count for the user."""
-        stats = self._get_user_stats(obj)
-        return stats.get('replies', 0)
-
-    def get_inactive_flags(self, obj):
-        """Get inactive flag count for the user."""
-        stats = self._get_user_stats(obj)
-        return stats.get('inactive_flags', 0)
-
-    def get_active_flags(self, obj):
-        """Get active flag count for the user."""
-        stats = self._get_user_stats(obj)
-        return stats.get('active_flags', 0)
